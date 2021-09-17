@@ -1,14 +1,6 @@
-#include <cctype>
-#include <cstdio>
 #include <cstdlib>
-#include <list>
-#include <locale>
-#include <stdbool.h>
-#include <algorithm>
-
 #include <ctype.h>
-#include <string.h>
-#include <iostream>
+#include <stdio.h>
 
 static inline bool is_letter(char symbol) {
     return !isspace(symbol) && !ispunct(symbol);

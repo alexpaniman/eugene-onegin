@@ -1,98 +1,163 @@
 #include <cstdlib>
 #include <ctype.h>
 #include <stdio.h>
+#include <locale.h>
+#include <cwchar>
+#include <cwctype>
+#include <sys/stat.h>
 
-static inline bool is_letter(char symbol) {
-    return !isspace(symbol) && !ispunct(symbol);
-}
+int compare_lexicographically(const wchar_t *const str1,
+                              const wchar_t *const str2,
+                              int direction) {
 
-int compare_lexicographically(char* str1, char* str2, int direction) {
-    while (*str1 != '\0' && *str2 != '\0')
-        if (*str1 == *str2) {
-            str1 += direction;
-            str2 += direction;
-        } else if (!is_letter(*str1)) {
-            str1 += direction;
-        } else if (!is_letter(*str2)) {
-            str2 += direction;
-        } else break;
+    int ind1 = 0, ind2 = 0;
 
-    return str1[0] > str2[0];
+    while (ind1 >= 0 && ind2 >= 0) {
+        wchar_t ch1 = str1[ind1], ch2 = str2[ind2];
+
+        if (ch1 == L'\0' || ch2 == L'\0')
+            break;
+
+        if (towlower(ch1) == towlower(ch2)) {
+            ind1 += direction;
+            ind2 += direction;
+        }
+        else if (!iswalpha(ch1))
+            ind1 += direction;
+        else if (!iswalpha(ch2))
+            ind2 += direction;
+        else break;
+    }
+
+    wchar_t downcased1 = towlower(str1[ind1]),
+            downcased2 = towlower(str2[ind2]);
+
+    if (downcased1 == downcased2)
+        return isupper(str1[ind1]);
+
+    return downcased1 > downcased2;
 }
 
 struct line {
-    char* beg;
-    char* end;
+    const wchar_t* beg;
+    const wchar_t* end;
 };
 
-int compare_lines_forward(const void* line1_void_ptr, const void* line2_void_ptr) {
+int compare_lines_forward(const void* const line1_void_ptr,
+                          const void* const line2_void_ptr) {
 
     const line* line1 = (const line*) line1_void_ptr;
     const line* line2 = (const line*) line2_void_ptr;
 
-    return compare_lexicographically(line1->beg, line2->beg, +1);
+    return compare_lexicographically(line1->beg, line2->beg, +1 /* Go forward */);
 }
 
-int compare_lines_backward(const void* line1_void_ptr, const void* line2_void_ptr) {
+int compare_lines_backward(const void* const line1_void_ptr,
+                           const void* const line2_void_ptr) {
 
-    const line* line1 = (const line*) line1_void_ptr;
-    const line* line2 = (const line*) line2_void_ptr;
+    const line* const line1 = (const line*) line1_void_ptr;
+    const line* const line2 = (const line*) line2_void_ptr;
 
-    return compare_lexicographically(line1->end, line2->end, -1);
+    return compare_lexicographically(line1->end, line2->end, -1 /* Go backward */);
 }
 
-char* read_file(const char* file_name, long* file_size) {
-    FILE* file = fopen(file_name, "r");
+// Return file size in bytes
+ssize_t get_file_size(FILE* const file) {
+    int fd = fileno(file);
 
-    fseek(file, 0, SEEK_END);
-    *file_size = ftell(file);
-    rewind(file);
+    if (fd == -1) {
+        perror("Error getting file descriptor");
+        return -1;
+    }
 
-    setvbuf(stdout, NULL, _IONBF, 0);
+    struct stat file_stats;
+    int fstat_return_code = fstat(fd, &file_stats);
 
-    char *buffer = (char*) malloc((size_t) *file_size + 2);
-    *file_size = (long) fread(buffer, 1, (size_t) *file_size, file);
+    if (fstat_return_code == -1) {
+        perror("Error getting file size");
+        return -1;
+    }
 
-    fclose(file);
-    file = NULL;
+    return (ssize_t) file_stats.st_size;
+}
 
+wchar_t* read_file(const char* const file_name) {
+    FILE* input_file = fopen(file_name, "r");
+
+    if (input_file == NULL) {
+        perror("Error opening file");
+        return NULL;
+    }
+
+    const size_t size_bytes = get_file_size(input_file);
+
+    // Allocates wchar_t for every byte in the file, it's likely more
+    // space than required, but it's always enough.
+
+    wchar_t* buffer = (wchar_t*)
+        calloc(sizeof *buffer, size_bytes + 1 /* for '\0's */);
+
+    if (buffer == NULL) {
+        perror("Error allocating memory to store symbols");
+        return NULL;
+    }
+
+    wchar_t* eof = buffer;
+    while (fgetws_unlocked(eof, (int) size_bytes + 1, input_file) != NULL) {
+
+        /* ┌─  Previous Line  ─┐┌────  Advance EOF Here  ────┐
+         * ↓                   ↓↑ ←─────  From Here          ↓
+         * ...CCCCCCCCCCCCCCCCCNCCCCCCCCCCCCCCCCCCCCCCCCCCCCN0
+         *     [line chars]    ↑        [line chars]        ↑↑
+         * ... ←─────────────  LF   ────────────────────────┘│
+         * ... ←─────────────  EOF  ─────────────────────────┘ */
+
+        while (*eof != L'\0')
+            ++ eof;
+    }
+
+    fclose(input_file), input_file = NULL;
     return buffer;
 }
 
-int count_new_lines(const char* buffer, const long file_size) {
+int count_new_lines(const wchar_t* buffer) {
     int new_line_count = 1;
-    for (int i = 0; i <= file_size; ++ i) {
-        char symbol = buffer[i];
 
+    wchar_t symbol = L'\0';
+    while ((symbol = *buffer++) != L'\0')
         if (symbol == '\n')
             ++ new_line_count;
-    }
 
     return new_line_count;
 }
 
-line* split_in_lines_with_terminator(char* buffer, const long file_size, int* number_of_lines) {
-    int new_line_count = count_new_lines(buffer, file_size);
+line* split_in_lines_with_terminator(wchar_t* const buffer, size_t* const number_of_lines) {
+    int new_line_count = count_new_lines(buffer);
 
-    line* lines = (line*) malloc((size_t) new_line_count * sizeof(line));
-    int line_index = 0;
+    line* lines = (line*) calloc(new_line_count, sizeof(line));
+    if (lines == NULL) {
+        perror("Error allocating memory to store lines");
+        return NULL;
+    }
+
+    size_t line_index = 0;
 
     lines[line_index].beg = buffer;
-    for (int i = 0; i <= file_size; ++ i) {
-        char symbol = buffer[i];
+    for (int i = 0; buffer[i] != L'\0'; ++ i) {
+        wchar_t symbol = buffer[i];
 
         if (symbol == '\n') {
             // Replace \n with string end (null-terminator)
             buffer[i] = '\0';
 
             if (i > 0)
-                // Do not start with newline
                 lines[line_index].end = buffer + (i - 1);
             else 
-                lines[line_index].end = buffer + i;
+                // If first line is empty, close it
+                lines[line_index].end = buffer;
 
-            if (i < file_size - 1)
-                // Do not end with newline
+            // Skip LF in the end
+            if (buffer[i + 1] != L'\0')
                 lines[++ line_index].beg = buffer + (i + 1);
         }
     }
@@ -101,34 +166,37 @@ line* split_in_lines_with_terminator(char* buffer, const long file_size, int* nu
     return lines;
 }
 
-void fprint_lines(FILE* output, const line* lines, const int number_of_lines) {
-    for (int i = 0; i < number_of_lines; ++ i) {
+void fprint_lines(FILE* output, const line* lines, const size_t number_of_lines) {
+    for (size_t i = 0; i < number_of_lines; ++ i) {
         line current = lines[i];
 
-        fputs(current.beg, output);
-        fputs("\n", output);
+        fputws(current.beg, output);
+        fputws(L"\n", output);
     }
 }
 
-void fsort_and_print_lines(FILE *output, line *lines, const int number_of_lines,
+void fsort_and_print_lines(FILE *output, line *lines, const size_t number_of_lines,
                            __compar_fn_t compare) {
 
-    qsort(lines, (size_t) number_of_lines, sizeof(line), compare);
-  fprint_lines(output, lines, number_of_lines);
+    qsort(lines, number_of_lines, sizeof(line), compare);
+    fprint_lines(output, lines, number_of_lines);
 }
 
-void concatenate_separated_lines(char* buffer, const long file_size) {
-    for (int i = 0; i <= file_size; ++ i)
-        if (buffer[i] == '\0')
+void concatenate_separated_lines(wchar_t* buffer, const size_t number_of_lines) {
+    for (size_t i = 0, line_num = 1; line_num < number_of_lines; ++ i)
+        if (buffer[i] == '\0') {
             buffer[i] = '\n';
+            ++ line_num;
+        }
 }
 
 int main(void) {
-    long file_size = 0;
-    char* buffer = read_file("onegin.txt", &file_size);
+    setlocale(LC_ALL, "");
 
-    int number_of_lines = 0;
-    line* lines = split_in_lines_with_terminator(buffer, file_size, &number_of_lines);
+    wchar_t* buffer = read_file("onegin.txt");
+
+    size_t number_of_lines = 0;
+    line* lines = split_in_lines_with_terminator(buffer, &number_of_lines);
 
     FILE* output = fopen("onegin-out.txt", "w");
 
@@ -136,16 +204,13 @@ int main(void) {
 
     fsort_and_print_lines(output, lines, number_of_lines, compare_lines_backward);
 
-    concatenate_separated_lines(buffer, file_size);
-    fputs(buffer, output);
+    concatenate_separated_lines(buffer, number_of_lines);
+    fputws(buffer, output);
+
+    // Close output file
+    fclose(output), output = NULL;
 
     // Free everything
-    fclose(output);
-    output = NULL;
-
-    free(lines);
-    lines = NULL;
-
-    free(buffer);
-    lines = NULL;
+    free(lines) , lines  = NULL;
+    free(buffer), buffer = NULL;
 }
